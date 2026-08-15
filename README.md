@@ -45,7 +45,7 @@ This extension does one thing well: **a real, native-looking panel on every seco
 ### From this repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/second-monitor-top-bar.git
+git clone https://github.com/HridoyVaraby/second-monitor-top-bar.git
 cd second-monitor-top-bar
 ./tools/install.sh
 ```
@@ -159,4 +159,4 @@ GNOME 42 gotchas that cost us debugging cycles (all handled in this codebase):
 
 ## License
 
-Add a `LICENSE` file before publishing if you want one (MIT is a common choice for shell extensions).
+[MIT](LICENSE) — free to use, modify and redistribute.
