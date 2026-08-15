@@ -1,0 +1,34 @@
+/*
+ * Second Monitor Top Bar
+ *
+ * The secondary panels reuse the theme's own #panel rules (background,
+ * height, font) by using the actor name 'panel', so they automatically
+ * match Yaru / Yaru-dark / Orchis / HighContrast. Only the extension's own
+ * items are styled below.
+ */
+
+/* Focused window title (left slot) */
+.smtb-title {
+    max-width: 420px;
+    padding-right: 6px;
+}
+
+.smtb-appicon {
+    padding: 0 5px 0 10px;
+}
+
+/* Clock icon (center slot) */
+.smtb-clockicon {
+    padding-right: 5px;
+}
+
+/* Metric icons + values (right slot) */
+.smtb-infoicon {
+    padding: 0 3px;
+}
+
+.smtb-infoval {
+    padding-right: 12px;
+    /* keep the numbers steady while values change width */
+    letter-spacing: 0.02em;
+}

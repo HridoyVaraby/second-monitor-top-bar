@@ -1,0 +1,21 @@
+# --- GNOME extension packaging (extensions.gnome.org zip bundles)
+*.zip
+*.shell-extension.zip
+
+# --- Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Logs / local test output
+*.log
+
+# --- Node tooling (only if lint/format tooling is added later)
+node_modules/

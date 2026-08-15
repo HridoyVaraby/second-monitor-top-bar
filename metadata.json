@@ -1,0 +1,7 @@
+{
+    "uuid": "second-monitor-top-bar@hridoyvaraby",
+    "name": "Second Monitor Top Bar",
+    "description": "Adds a minimal top panel with a clock to every non-primary monitor. The primary panel is never modified.",
+    "shell-version": ["42"],
+    "version": 6
+}
