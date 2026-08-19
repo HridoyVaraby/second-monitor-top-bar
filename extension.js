@@ -22,6 +22,7 @@ const GLib = imports.gi.GLib;
 const GObject = imports.gi.GObject;
 const GnomeDesktop = imports.gi.GnomeDesktop;
 const Clutter = imports.gi.Clutter;
+const Gvc = imports.gi.Gvc;
 const Meta = imports.gi.Meta;
 const Shell = imports.gi.Shell;
 const Pango = imports.gi.Pango;
@@ -29,6 +30,9 @@ const St = imports.gi.St;
 
 const ByteArray = imports.byteArray;
 const Main = imports.ui.main;
+const PanelMenu = imports.ui.panelMenu;
+const PopupMenu = imports.ui.popupMenu;
+const Slider = imports.ui.slider;
 
 const _PREFIX = 'second-monitor-top-bar';
 
@@ -39,6 +43,7 @@ const Config = {
     showCpu: true,
     showRam: true,
     showNet: true,           // download / upload rates
+    showVolume: true,        // volume button: icon + %, click for popup slider
     showClockIcon: true,     // small clock icon left of the time
     updateIntervalSec: 2,    // system info sampling period
     iconSize: 16,            // app icon size in px
@@ -181,6 +186,211 @@ var SystemInfoSampler = class SystemInfoSampler {
  * center. Manual allocation also guarantees the three slots can never
  * overlap, whatever the theme does.)
  */
+function _volumeIconName(muted, fraction) {
+    if (muted || fraction <= 0)
+        return 'audio-volume-muted-symbolic';
+    if (fraction < 0.33)
+        return 'audio-volume-low-symbolic';
+    if (fraction < 0.67)
+        return 'audio-volume-medium-symbolic';
+    return 'audio-volume-high-symbolic';
+}
+
+/*
+ * Bar button for volume: state icon + percentage, set apart from the stats
+ * by a divider. Clicking opens the shell-standard top-bar popup
+ * (PanelMenu.Button + BoxPointer — the same machinery the primary bar's
+ * menus use; BoxPointer anchors the popup under the button via
+ * findMonitorForActor, so it opens on the right monitor). The popup holds
+ * a native themed slider (ui/slider.js) and a mute switch. Scrolling on
+ * the bar button nudges the volume directly.
+ */
+var VolumeButton = class VolumeButton {
+    constructor(controller) {
+        this._controller = controller;
+
+        this.button = new PanelMenu.Button(0.0, 'Volume');
+
+        const box = new St.BoxLayout({ style_class: 'smtb-volbox' });
+        this.icon = new St.Icon({
+            icon_name: 'audio-volume-high-symbolic',
+            icon_size: Config.infoIconSize,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this.label = new St.Label({
+            style_class: 'smtb-volval',
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        box.add_child(this.icon);
+        box.add_child(this.label);
+        // St.Widget (not St.Bin) — Clutter.Actor has no set_child() on
+        // this build, so parent the content with add_child(); ButtonBox's
+        // allocation vfuncs use get_first_child() either way.
+        this.button.add_child(box);
+
+        this.button.connect('scroll-event', this._onScroll.bind(this));
+
+        // --- popup contents ---
+        // GNOME 42 slider: 'value' is a BarLevel GObject property — there
+        // is no 'value-changed' signal (only 'drag-begin'/'drag-end'), and
+        // the slider already sets x_expand itself.
+        this._slider = new Slider.Slider(0);
+        this._slider.connect('notify::value', () => {
+            this._controller.setFraction(this._slider.value);
+        });
+
+        const sliderItem = new PopupMenu.PopupBaseMenuItem({
+            reactive: false,
+            can_focus: false,
+        });
+        sliderItem.add_child(this._slider);
+
+        this._muteItem = new PopupMenu.PopupSwitchMenuItem('Mute', false);
+        this._muteItem.connect('toggled', () => this._controller.toggleMute());
+
+        this.button.menu.addMenuItem(sliderItem);
+        this.button.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this.button.menu.addMenuItem(this._muteItem);
+    }
+
+    get actor() {
+        // PanelMenu.Button wraps itself in a container St.Bin — that is
+        // what gets parented into a panel (panel.js does the same).
+        return this.button.container;
+    }
+
+    sync() {
+        const ok = this._controller.available;
+        this.button.container.visible = ok;
+        if (!ok)
+            return;
+        const fraction = this._controller.fraction;
+        const muted = this._controller.muted;
+        this.icon.icon_name = _volumeIconName(muted, fraction);
+        this.label.text = `${Math.round(fraction * 100)}%`;
+        this._slider.value = fraction;
+        this._muteItem.setToggleState(muted);
+    }
+
+    _onScroll(actor, event) {
+        const direction = event.get_scroll_direction();
+        let delta = 0;
+        if (direction === Clutter.ScrollDirection.UP)
+            delta = 0.05;
+        else if (direction === Clutter.ScrollDirection.DOWN)
+            delta = -0.05;
+        else if (direction === Clutter.ScrollDirection.SMOOTH)
+            delta = -event.get_scroll_delta()[1] * 0.05;
+        else
+            return Clutter.EVENT_PROPAGATE;
+        this._controller.setFraction(this._controller.fraction + delta);
+        return Clutter.EVENT_STOP;
+    }
+
+    destroy() {
+        this.button.destroy();
+    }
+};
+
+
+/*
+ * Owns the single Gvc.MixerControl connection (one per extension, not per
+ * panel) and fans sink updates out to every panel's UI.
+ */
+var VolumeController = class VolumeController {
+    constructor() {
+        this._listeners = new Set();
+        this._sink = null;
+        this._sinkIds = [];
+
+        this._control = new Gvc.MixerControl({
+            name: 'Second Monitor Top Bar',
+        });
+        this._stateChangedId = this._control.connect(
+            'state-changed', () => this._updateSink());
+        this._defaultSinkId = this._control.connect(
+            'default-sink-changed', () => this._updateSink());
+        this._control.open();
+        this._updateSink();
+    }
+
+    addListener(fn) {
+        this._listeners.add(fn);
+    }
+
+    removeListener(fn) {
+        this._listeners.delete(fn);
+    }
+
+    get available() {
+        return this._sink !== null;
+    }
+
+    get fraction() {
+        if (!this._sink)
+            return 0;
+        const max = this._control.get_vol_max_norm();
+        return max > 0 ? this._sink.volume / max : 0;
+    }
+
+    get muted() {
+        return this._sink ? this._sink.is_muted : false;
+    }
+
+    setFraction(fraction) {
+        if (!this._sink)
+            return;
+        const max = this._control.get_vol_max_norm();
+        this._sink.volume = Math.round(Math.clamp(fraction, 0, 1) * max);
+        this._sink.push_volume();
+    }
+
+    toggleMute() {
+        if (this._sink)
+            this._sink.change_is_muted(!this._sink.is_muted);
+    }
+
+    _updateSink() {
+        const sink = this._control.get_default_sink();
+        if (sink === this._sink)
+            return;
+
+        this._disconnectSink();
+        this._sink = sink;
+        if (sink) {
+            this._sinkIds.push(sink.connect('notify::volume', () => this._notify()));
+            this._sinkIds.push(sink.connect('notify::is-muted', () => this._notify()));
+        }
+        this._notify();
+    }
+
+    _disconnectSink() {
+        if (this._sink) {
+            this._sinkIds.forEach(id => this._sink.disconnect(id));
+        }
+        this._sinkIds = [];
+    }
+
+    _notify() {
+        this._listeners.forEach(fn => fn(this));
+    }
+
+    destroy() {
+        this._listeners.clear();
+        this._disconnectSink();
+        this._sink = null;
+        if (this._stateChangedId) {
+            this._control.disconnect(this._stateChangedId);
+            this._stateChangedId = 0;
+        }
+        if (this._defaultSinkId) {
+            this._control.disconnect(this._defaultSinkId);
+            this._defaultSinkId = 0;
+        }
+        this._control.close();
+    }
+};
+
 var SecondaryPanelBox = GObject.registerClass(
 class SecondaryPanelBox extends St.Widget {
     _init() {
@@ -243,9 +453,12 @@ var SecondaryPanel = class SecondaryPanel {
     /**
      * @param {Meta.Monitor} monitor  a monitor from Main.layoutManager.monitors
      * @param {GnomeDesktop.WallClock} wallClock  shared clock source
+     * @param {?VolumeController} volume  shared mixer controller (null if disabled)
      */
-    constructor(monitor, wallClock) {
+    constructor(monitor, wallClock, volume) {
         this.monitor = monitor;
+        this._volume = volume || null;
+        this._volumeListener = null;
 
         // Window tracking state
         this._window = null;
@@ -286,15 +499,29 @@ var SecondaryPanel = class SecondaryPanel {
         this._leftBox.add_child(this._titleLabel);
         this._leftBox.visible = false; // until a window is focused here
 
-        // ---- right: system info -------------------------------------------
-        // Each metric is an icon + value group (icon names verified against
-        // the installed icon theme; symbolic icons recolor with the theme).
+        // ---- right: system stats, volume set apart at the far end --------
         this._cpuGroup = Config.showCpu
             ? this._makeInfoGroup('speedometer-symbolic') : null;
         this._ramGroup = Config.showRam
             ? this._makeInfoGroup('media-flash-symbolic') : null;
         this._netGroup = Config.showNet
             ? this._makeInfoGroup('network-transmit-receive-symbolic') : null;
+
+        // Volume: icon + percentage, separated from the stats by a subtle
+        // divider. Click opens the popup with the slider; hidden until a
+        // default sink exists.
+        this._volumeButton = null;
+        this._volumeListener = null;
+        if (Config.showVolume && this._volume) {
+            this._volumeButton = new VolumeButton(this._volume);
+            this._rightBox.add_child(new St.Widget({
+                style_class: 'smtb-voldivider',
+            }));
+            this._rightBox.add_child(this._volumeButton.actor);
+            this._volumeListener = () => this._volumeButton.sync();
+            this._volume.addListener(this._volumeListener);
+            this._volumeButton.sync();
+        }
 
         // Position like layoutManager._updateBoxes() positions panelBox:
         // top-left of the monitor, full width, theme-driven height.
@@ -433,6 +660,13 @@ var SecondaryPanel = class SecondaryPanel {
     destroy() {
         if (!this.actor)
             return;
+        if (this._volume && this._volumeListener)
+            this._volume.removeListener(this._volumeListener);
+        this._volumeListener = null;
+        if (this._volumeButton) {
+            this._volumeButton.destroy();
+            this._volumeButton = null;
+        }
         this._disconnectWindow();
         try {
             Main.layoutManager.removeChrome(this.actor);
@@ -453,6 +687,7 @@ var PanelManager = class PanelManager {
         this._panels = [];
         this._wallClock = null;
         this._sampler = null;
+        this._volume = null;
         this._lastSample = null;
         this._monitorsChangedId = 0;
         this._sessionModeUpdatedId = 0;
@@ -462,6 +697,16 @@ var PanelManager = class PanelManager {
 
     enable() {
         this._wallClock = new GnomeDesktop.WallClock();
+
+        if (Config.showVolume) {
+            try {
+                this._volume = new VolumeController();
+            } catch (e) {
+                _log(`volume control unavailable: ${e.message}`);
+                global.logError(e);
+                this._volume = null;
+            }
+        }
 
         if (Config.showCpu || Config.showRam || Config.showNet)
             this._sampler = new SystemInfoSampler(
@@ -499,6 +744,10 @@ var PanelManager = class PanelManager {
             this._focusWindowId = 0;
         }
         this._destroyPanels();
+        if (this._volume) {
+            this._volume.destroy();
+            this._volume = null;
+        }
         if (this._wallClock) {
             this._wallClock.run_dispose();
             this._wallClock = null;
@@ -532,7 +781,8 @@ var PanelManager = class PanelManager {
             if (index === lm.primaryIndex)
                 return;
             try {
-                this._panels.push(new SecondaryPanel(monitor, this._wallClock));
+                this._panels.push(
+                    new SecondaryPanel(monitor, this._wallClock, this._volume));
             } catch (e) {
                 _log(`panel for monitor ${index} failed: ${e.message}`);
                 global.logError(e);

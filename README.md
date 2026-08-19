@@ -24,7 +24,7 @@ This extension does one thing well: **a real, native-looking panel on every seco
 |------|--------------|
 | **Left** | Icon + application **name** of the window focused on that monitor (per-monitor and sticky — survives focus moving to another screen, clears when the window closes) |
 | **Center** | Clock — identical text and behavior to the primary bar's clock: 12/24-hour, date, seconds, all from your GNOME settings |
-| **Right** | Live **CPU %**, **RAM %** and **network ↓/↑ rates**, each with a symbolic icon, sampled every 2 seconds |
+| **Right** | Live **CPU %**, **RAM %** and **network ↓/↑ rates** (symbolic icons, sampled every 2 s), then — set apart by a divider — the **volume control**: state icon + percentage; click to open the standard top-bar popup with a native slider and mute switch, or just scroll on the button |
 
 - **Native look** — the panel reuses the shell theme's own `#panel` styling, so it automatically matches any GNOME theme, including custom ones
 - **Real window management** — chrome struts are registered per monitor, so maximized and tiled windows stop below the bar instead of sliding under it
@@ -86,6 +86,7 @@ All options live in the `Config` object at the top of [extension.js](extension.j
 | `showCpu` | `true` | CPU usage (right slot) |
 | `showRam` | `true` | RAM usage (right slot) |
 | `showNet` | `true` | Network down/up rates (right slot) |
+| `showVolume` | `true` | Volume button (icon + %, popup slider, scroll to adjust) |
 | `updateIntervalSec` | `2` | System info sampling period, in seconds |
 | `iconSize` | `16` | Focused-app icon size in px |
 | `infoIconSize` | `14` | CPU/RAM/NET/clock icon size in px |
@@ -98,6 +99,7 @@ Interesting bits for extension developers — everything was verified against th
 - **Placement & struts** — each panel is added via `Main.layoutManager.addChrome(actor, { affectsStruts: true })` and positioned at its monitor's top-left, mirroring how the shell positions `panelBox`. The layout manager converts a full-width top-edge chrome actor into a **per-monitor strut** (`_updateRegions`)
 - **Clock** — `GnomeDesktop.WallClock` bound to an `St.Label` with `GObject.BindingFlags.SYNC_CREATE`, exactly like the date menu in `ui/dateMenu.js`, so all clock settings work for free
 - **Focused app** — `Shell.WindowTracker.get_default().get_window_app()` per focus change, filtered to normal windows on that monitor
+- **Volume** — one shared `Gvc.MixerControl` (the shell's own volume library, already on every GNOME install — no extra dependency). The bar button is a `PanelMenu.Button` opening a real `PopupMenu` with the native `ui/slider.js` slider — the same popup machinery every top-bar menu uses. `BoxPointer` anchors the popup via `findMonitorForActor`, so it opens on the monitor the bar lives on
 - **System stats** — one shared sampler reads `/proc/stat` (CPU deltas), `/proc/meminfo` (`MemAvailable`), and `/proc/net/dev` (per-interface counters, skipping `lo`/`veth`/`docker`); one timer drives every panel
 - **Rebuilds** — `monitors-changed` is debounced to the next idle (display changes arrive in bursts), then all panels are rebuilt from `layoutManager.monitors`
 
